@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import { PlayCircle, Upload, RefreshCw, X } from 'lucide-react';
-import { getDominantColors } from '../utils/colorUtils';
+
 import { useShop } from '../context/ShopContext';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -24,22 +24,6 @@ function captureFrame(source, isRTSP) {
   c.height = isRTSP ? source.naturalHeight : source.videoHeight;
   c.getContext('2d').drawImage(source, 0, 0);
   return c.toDataURL('image/jpeg', 0.85);
-}
-
-function sampleColor(source, bbox, isRTSP) {
-  const [x, y, w, h] = bbox;
-  const tmp = document.createElement('canvas');
-  tmp.width = 90; tmp.height = 90;
-  const ctx = tmp.getContext('2d', { willReadFrequently: true });
-  [
-    [0.40,0.50],[0.45,0.50],[0.50,0.50],
-    [0.55,0.50],[0.60,0.50],[0.45,0.60],[0.55,0.60],
-  ].forEach(([rx, ry], i) => {
-    try {
-      ctx.drawImage(source, x+w*rx, y+h*ry, w*0.12, h*0.12, (i%3)*30, Math.floor(i/3)*30, 30, 30);
-    } catch {}
-  });
-  return getDominantColors(ctx.getImageData(0, 0, 90, 90), 6)[0];
 }
 
 function computeIoU(bbox1, bbox2) {
@@ -64,38 +48,25 @@ export default function Detector() {
   const streamRef    = useRef(null);
   const requestRef   = useRef(null);
 
-  // detection-loop state (all refs — loop never restarts due to these)
-  const frameRef      = useRef(0);
-  const trackersRef   = useRef([]);
-  const colorCacheRef = useRef({});
-  const colorHistRef  = useRef({});
-  const preFetchRef   = useRef({});
+  const frameRef    = useRef(0);
+  const trackersRef = useRef([]);
 
-  // virtual lines (fraction of canvas height)
-  const line1Ref  = useRef({ left: 0.35, right: 0.35 });
-  const line2Ref  = useRef({ left: 0.65, right: 0.65 });
-  const dragging  = useRef(null);
-  const dragPart  = useRef(null);
+  const line1Ref = useRef({ left: 0.35, right: 0.35 });
+  const line2Ref = useRef({ left: 0.65, right: 0.65 });
+  const dragging = useRef(null);
+  const dragPart = useRef(null);
 
-  // React state (UI only)
   const [model,          setModel]         = useState(null);
   const [error,          setError]         = useState(null);
   const [isMonitoring,   setIsMonitoring]  = useState(false);
   const [isRTSP,         setIsRTSP]        = useState(false);
   const [isLooping,      setIsLooping]     = useState(false);
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
-  const [selectedExit,   setSelectedExit]  = useState('');
 
-  // Detection queue — replaces single match state
-  const [detectionQueue, setDetectionQueue_] = useState([]);
-  const queueRef = useRef([]);
-  const setDetectionQueue = (updater) => {
-    const next = typeof updater === 'function' ? updater(queueRef.current) : updater;
-    queueRef.current = next;
-    setDetectionQueue_(next);
-  };
-
-  const { addVehicle, vehicles, updateVehicleStatus, feedSource, rtspUrl } = useShop();
+  const {
+    addVehicle, vehicles, updateVehicle, updateVehicleStatus, removeVehicle,
+    feedSource, rtspUrl,
+  } = useShop();
 
   const vehiclesRef = useRef(vehicles);
   useEffect(() => { vehiclesRef.current = vehicles; }, [vehicles]);
@@ -216,10 +187,7 @@ export default function Detector() {
     const ctx = canvas.getContext('2d');
     let busy = false;
 
-    trackersRef.current   = [];
-    colorCacheRef.current = {};
-    colorHistRef.current  = {};
-    preFetchRef.current   = {};
+    trackersRef.current = [];
 
     function getSideOfLine(x, y, lineObj, canvasWidth, canvasHeight) {
       const ly1 = canvasHeight * lineObj.left;
@@ -282,7 +250,6 @@ export default function Detector() {
         const matchedIds   = new Set();
 
         for (const car of cars) {
-          // ── IoU-first tracker matching ──
           let best = null, bestIoU = -1, bestDist = Infinity;
           for (const t of trackersRef.current) {
             const iou  = t.bbox ? computeIoU(car.bbox, t.bbox) : 0;
@@ -291,7 +258,6 @@ export default function Detector() {
               bestIoU = iou; bestDist = dist; best = t;
             }
           }
-          // Require meaningful IoU overlap OR tight centroid proximity — prevents stealing a nearby car's tracker
           if (bestIoU < 0.2 && bestDist >= 120) best = null;
 
           const t = best
@@ -311,7 +277,7 @@ export default function Detector() {
           t.frames++;
           matchedIds.add(t.id);
 
-          // ── 1. Per-tracker line crossing (no global lock) ──
+          // ── line crossing ──
           if (t.prevCy !== null && !t.triggered) {
             const curL1 = getSideOfLine(car.cx, car.cy, line1Ref.current, canvas.width, canvas.height);
             const preL1 = getSideOfLine(t.prevCx, t.prevCy, line1Ref.current, canvas.width, canvas.height);
@@ -321,31 +287,14 @@ export default function Detector() {
             if (!t.l1Crossed && curL1 !== preL1) {
               t.l1Crossed = true;
               if (t.firstLine === null) t.firstLine = 1;
-              if (!preFetchRef.current[t.id]) {
-                try { preFetchRef.current[t.id] = fetchPlate(captureFrame(source, isRTSP)); } catch {}
-              }
             }
             if (!t.l2Crossed && curL2 !== preL2) {
               t.l2Crossed = true;
               if (t.firstLine === null) t.firstLine = 2;
-              if (!preFetchRef.current[t.id]) {
-                try { preFetchRef.current[t.id] = fetchPlate(captureFrame(source, isRTSP)); } catch {}
-              }
             }
           }
 
-          // ── 2. Color sampling ──
-          if (t.l1Crossed && frameRef.current % 2 === 0) {
-            const c = sampleColor(source, car.bbox, isRTSP);
-            if (!colorHistRef.current[t.id]) colorHistRef.current[t.id] = [];
-            colorHistRef.current[t.id].push(c);
-            if (colorHistRef.current[t.id].length > 10) colorHistRef.current[t.id].shift();
-            const votes  = colorHistRef.current[t.id].reduce((a, v) => { a[v] = (a[v] || 0) + 1; return a; }, {});
-            const sorted = Object.keys(votes).sort((a, b) => votes[b] - votes[a]);
-            if (votes[sorted[0]] >= 6) colorCacheRef.current[t.id] = sorted[0];
-          }
-
-          // ── 2.5 Multi-frame capture ──
+          // ── multi-frame capture ──
           if ((t.l1Crossed || t.l2Crossed) && !t.triggered) {
             const l1Y  = getLineYAtX(line1Ref.current, car.cx, canvas.width, canvas.height);
             const l2Y  = getLineYAtX(line2Ref.current, car.cx, canvas.width, canvas.height);
@@ -361,75 +310,94 @@ export default function Detector() {
             });
           }
 
-          // ── 3. Trigger — each car independently, no panel-open gate ──
+          // ── trigger: both lines crossed → add to WAITING, scan in background ──
           if (t.l1Crossed && t.l2Crossed && !t.triggered && car.score > 0.20) {
-            t.triggered = true;  // set synchronously before any async work
+            t.triggered = true;
 
             const direction = t.firstLine === 1 ? 'INGRESS' : 'EGRESS';
-            const colorName = colorCacheRef.current[t.id] || 'Unknown';
-            const newId     = `VEH-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+            const pendingId = `VEH-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
             const imageUrl  = t.frameBuffer[Math.floor(t.frameBuffer.length / 2)]
               || t.frameBuffer[0]
               || (() => { try { return captureFrame(source, isRTSP); } catch { return ''; } })();
 
-            const m = {
-              id: newId,
-              qrCodeUrl: `https://chart.googleapis.com/chart?chs=150x150&cht=qr&chl=${newId}&choe=UTF-8`,
-              imageUrl, colorName,
+            // Immediately land in WAITING column with scanning state
+            addVehicle({
+              id: pendingId,
+              status: 'WAITING',
+              pendingDirection: direction,
+              plateStatus: 'scanning',
+              scanAttempt: 1,
+              totalAttempts: t.frameBuffer.length || 1,
+              imageUrl,
               type: car.label,
               confidence: car.score,
               timestamp: new Date().toISOString(),
+              licensePlate: '',
+              plateImageUrl: null,
+              qrCodeUrl: `https://chart.googleapis.com/chart?chs=150x150&cht=qr&chl=${pendingId}&choe=UTF-8`,
               direction,
-              licensePlate: '', plateImageUrl: null, plateStatus: 'scanning',
-              scanAttempt: 1, totalAttempts: t.frameBuffer.length || 1,
-            };
-
-            setDetectionQueue(prev => {
-              const next = [...prev, m];
-              // Auto-select exit vehicle only when this is the first (and only) item in queue
-              if (direction === 'EGRESS' && next.length === 1) {
-                const entered = vehiclesRef.current.filter(v => v.status === 'ENTERED');
-                if (entered.length > 0) setSelectedExit(entered[0].id);
-              }
-              return next;
             });
 
-            // Sequential OCR — updates queue item by ID regardless of queue position
+            // Scan frames sequentially; auto-resolve when plate found
             const validateSequential = async (index) => {
               const currentUrl = t.frameBuffer[index] || imageUrl;
-              setDetectionQueue(prev => prev.map(item =>
-                item.id === newId ? { ...item, scanAttempt: index + 1 } : item
-              ));
+              updateVehicle(pendingId, { scanAttempt: index + 1 });
 
               const pr = await fetchPlate(currentUrl);
               const isStrong = pr && pr.found && (pr.ocr_confidence > 0.85 || (pr.plate_text && pr.plate_text.length >= 8));
 
               if (isStrong || index >= t.frameBuffer.length - 1) {
                 if (!pr || pr.error || !pr.found) {
-                  setDetectionQueue(prev => prev.map(item =>
-                    item.id === newId
-                      ? { ...item, plateStatus: 'not_found', detectionLog: pr?.detection_log || [] }
-                      : item
-                  ));
+                  // No plate found — stay in WAITING with notification
+                  updateVehicle(pendingId, { plateStatus: 'not_found', detectionLog: pr?.detection_log || [] });
                   return;
                 }
-                setDetectionQueue(prev => prev.map(item => {
-                  if (item.id !== newId) return item;
-                  return {
-                    ...item,
-                    licensePlate:  pr.plate_text  || '',
-                    plateImageUrl: pr.image_b64   || null,
-                    plateStatus:   'found',
-                    detectionLog:  pr.detection_log || [],
-                  };
-                }));
-                // Auto-match egress only if this item is currently at the head of the queue
-                if (direction === 'EGRESS' && queueRef.current[0]?.id === newId) {
-                  const entered = vehiclesRef.current.filter(v => v.status === 'ENTERED');
-                  const hit = entered.find(v => v.licensePlate && pr.plate_text &&
-                    v.licensePlate.toUpperCase() === pr.plate_text.toUpperCase())
-                    || entered.find(v => v.colorName === colorName && v.type === car.label);
-                  if (hit) setSelectedExit(hit.id);
+
+                const plateText = (pr.plate_text || '').toUpperCase();
+
+                if (direction === 'INGRESS') {
+                  // Check if this is a known vehicle re-entering
+                  const existing = vehiclesRef.current.find(v =>
+                    v.id !== pendingId &&
+                    !v.pendingDirection &&
+                    v.licensePlate?.toUpperCase() === plateText &&
+                    (v.status === 'TEMP_OUT' || v.status === 'WAITING')
+                  );
+                  if (existing) {
+                    // Re-entry: restore existing vehicle, discard placeholder
+                    updateVehicleStatus(existing.id, 'ENTERED');
+                    removeVehicle(pendingId);
+                  } else {
+                    // New vehicle: promote placeholder from WAITING → ENTERED
+                    updateVehicle(pendingId, {
+                      licensePlate: plateText,
+                      plateImageUrl: pr.image_b64 || null,
+                      plateStatus: 'found',
+                      pendingDirection: null,
+                      detectionLog: pr.detection_log || [],
+                    });
+                    updateVehicleStatus(pendingId, 'ENTERED');
+                  }
+                } else {
+                  // EGRESS: find the matching ENTERED vehicle
+                  const entered = vehiclesRef.current.find(v =>
+                    v.id !== pendingId &&
+                    v.licensePlate?.toUpperCase() === plateText &&
+                    v.status === 'ENTERED'
+                  );
+                  if (entered) {
+                    // Known exit: mark TEMP_OUT, discard placeholder
+                    updateVehicleStatus(entered.id, 'TEMP_OUT');
+                    removeVehicle(pendingId);
+                  } else {
+                    // Plate found but no matching ENTERED vehicle — leave in WAITING for manual resolve
+                    updateVehicle(pendingId, {
+                      licensePlate: plateText,
+                      plateImageUrl: pr.image_b64 || null,
+                      plateStatus: 'not_found',
+                      detectionLog: pr.detection_log || [],
+                    });
+                  }
                 }
               } else {
                 validateSequential(index + 1);
@@ -439,15 +407,14 @@ export default function Detector() {
             validateSequential(0);
           }
 
-          // ── 4. Draw bounding box once car has crossed at least one line ──
+          // ── draw bounding box once a line is crossed ──
           if (t.l1Crossed || t.l2Crossed) {
             const [bx, by, bw, bh] = car.bbox;
             const boxColor = (t.l1Crossed && t.l2Crossed) ? '#a855f7' : '#00d2ff';
             ctx.strokeStyle = boxColor; ctx.lineWidth = 4;
             ctx.strokeRect(bx, by, bw, bh);
 
-            const colorLabel = colorCacheRef.current[t.id] || '...';
-            const txt = `${colorLabel} ${car.label} ${Math.round(car.score * 100)}%`;
+            const txt = `${car.label} ${Math.round(car.score * 100)}%`;
             ctx.font = 'bold 15px sans-serif';
             const tw = ctx.measureText(txt).width + 12;
             ctx.fillStyle = boxColor; ctx.fillRect(bx, by > 22 ? by - 22 : by + bh, tw, 20);
@@ -464,7 +431,6 @@ export default function Detector() {
           nextTrackers.push(t);
         }
 
-        // Carry forward trackers for cars temporarily out of frame
         for (const oldT of trackersRef.current) {
           if (!matchedIds.has(oldT.id)) {
             oldT.lostFrames = (oldT.lostFrames || 0) + 1;
@@ -483,38 +449,7 @@ export default function Detector() {
     return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
   }, [isMonitoring, isRTSP, model]);
 
-  // ── actions ──
-  const dismissMatch = () => {
-    setDetectionQueue(prev => {
-      const next = prev.slice(1);
-      // Prepare selectedExit for the next item in queue
-      if (next[0]?.direction === 'EGRESS') {
-        const entered = vehiclesRef.current.filter(v => v.status === 'ENTERED');
-        setSelectedExit(entered.length > 0 ? entered[0].id : '');
-      } else {
-        setSelectedExit('');
-      }
-      return next;
-    });
-  };
-
-  const handleAccept = (status = 'ENTERED') => {
-    const head = queueRef.current[0];
-    if (!head) return;
-    addVehicle({ ...head, status });
-    dismissMatch();
-  };
-
-  const handleEgressUpdate = (status) => {
-    if (selectedExit) updateVehicleStatus(selectedExit, status);
-    dismissMatch();
-  };
-
   // ── render ──
-  const match      = detectionQueue[0] || null;
-  const queueCount = detectionQueue.length;
-  const isEntering = match?.direction === 'INGRESS';
-
   return (
     <div className="detector-section panel">
       <div className="card-top-border" style={{ backgroundColor: 'var(--accent-color)' }} />
@@ -590,25 +525,6 @@ export default function Detector() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-          {match && (
-            <span style={{
-              padding: '3px 10px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 800,
-              background: isEntering ? 'rgba(16,185,129,0.15)' : 'rgba(168,85,247,0.15)',
-              color:      isEntering ? '#10b981' : '#a855f7',
-              border:    `1px solid ${isEntering ? 'rgba(16,185,129,0.35)' : 'rgba(168,85,247,0.35)'}`,
-            }}>
-              {isEntering ? '▼ ENTERING' : '▲ EXITING'}
-            </span>
-          )}
-          {queueCount > 1 && (
-            <span style={{
-              padding: '3px 10px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: 800,
-              background: 'rgba(245,166,35,0.15)', color: '#f5a623',
-              border: '1px solid rgba(245,166,35,0.35)',
-            }}>
-              +{queueCount - 1} waiting
-            </span>
-          )}
           <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.72rem', cursor: 'pointer', color: 'var(--text-secondary)', fontWeight: 600, whiteSpace: 'nowrap' }}>
             <input type="checkbox" checked={isLooping} onChange={e => setIsLooping(e.target.checked)} style={{ accentColor: 'var(--accent-color)' }} />
             Loop
@@ -622,7 +538,6 @@ export default function Detector() {
 
       {/* ── video area ── */}
       <div className="video-container" style={{ position: 'relative' }}>
-
         {!isMonitoring && (
           <div className="monitoring-overlay animate-fade-in">
             <div className="monitoring-content">
@@ -673,173 +588,7 @@ export default function Detector() {
             </button>
           </div>
         )}
-
-        {/* ── Slide-up detection panel ── */}
-        {match && (
-          <div className="animate-slide-up" style={{
-            position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
-            background: 'linear-gradient(to top, rgba(10,11,14,0.97) 70%, transparent)',
-            borderBottomLeftRadius: '12px', borderBottomRightRadius: '12px',
-            padding: '0 16px 16px',
-          }}>
-            {/* direction + queue count + dismiss */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0 10px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{
-                  padding: '5px 14px', borderRadius: '6px', fontSize: '0.85rem', fontWeight: 900, letterSpacing: '0.05em',
-                  background: isEntering ? 'rgba(16,185,129,0.2)' : 'rgba(168,85,247,0.2)',
-                  color:      isEntering ? '#10b981' : '#a855f7',
-                  border:    `1.5px solid ${isEntering ? '#10b981' : '#a855f7'}`,
-                }}>
-                  {isEntering ? '▼  ENTERING' : '▲  EXITING'}
-                </span>
-                {queueCount > 1 && (
-                  <span style={{ fontSize: '0.7rem', color: '#f5a623', fontWeight: 700 }}>
-                    {queueCount - 1} more in queue
-                  </span>
-                )}
-              </div>
-              <button onClick={dismissMatch} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: '4px' }}>
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* main info row */}
-            <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
-              <img src={match.imageUrl} alt="cap"
-                style={{ width: 90, height: 68, objectFit: 'cover', borderRadius: '6px', flexShrink: 0, border: '2px solid rgba(255,255,255,0.08)' }} />
-
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                  <div style={{
-                    width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
-                    background: match.colorName.toLowerCase(),
-                    border: '1.5px solid rgba(255,255,255,0.2)',
-                  }} />
-                  <span style={{ fontWeight: 900, fontSize: '1rem', color: 'white', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {match.colorName} {match.type}
-                  </span>
-                  <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', flexShrink: 0 }}>
-                    {Math.round(match.confidence * 100)}%
-                  </span>
-                </div>
-
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                  ID: <strong style={{ color: 'white' }}>{match.id}</strong>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  {match.plateStatus === 'scanning' ? (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent-color)', fontSize: '0.78rem', fontWeight: 700 }}>
-                      <RefreshCw size={11} style={{ animation: 'spin 1.5s linear infinite' }} />
-                      Scanning frame {match.scanAttempt} of {match.totalAttempts}...
-                    </div>
-                  ) : (
-                    <>
-                      {match.plateImageUrl && (
-                        <img src={match.plateImageUrl} alt="plate"
-                          style={{ height: 28, maxWidth: 90, objectFit: 'contain', borderRadius: '3px', background: '#000' }} />
-                      )}
-                      <input
-                        type="text"
-                        value={match.licensePlate}
-                        onChange={e => {
-                          const val = e.target.value.toUpperCase();
-                          setDetectionQueue(prev => prev.map(item =>
-                            item.id === match.id ? { ...item, licensePlate: val } : item
-                          ));
-                        }}
-                        placeholder={match.plateStatus === 'not_found' ? 'Enter plate manually' : 'Plate...'}
-                        style={{
-                          flex: 1, padding: '4px 8px', background: 'rgba(255,255,255,0.07)', color: 'white',
-                          border: '1px solid rgba(255,255,255,0.12)', borderRadius: '5px',
-                          fontSize: '0.85rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
-                        }}
-                      />
-                    </>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Detection log */}
-            {match.detectionLog && match.detectionLog.length > 0 && (
-              <div style={{ marginTop: '10px', borderRadius: '6px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.08)' }}>
-                <div style={{
-                  padding: '5px 10px', background: 'rgba(0,210,255,0.08)',
-                  fontSize: '0.65rem', fontWeight: 800, letterSpacing: '0.08em',
-                  color: 'var(--accent-color)', textTransform: 'uppercase',
-                  borderBottom: '1px solid rgba(255,255,255,0.06)',
-                }}>
-                  Detection Log
-                </div>
-                <div style={{
-                  maxHeight: '110px', overflowY: 'auto', padding: '6px 10px',
-                  background: 'rgba(0,0,0,0.45)', fontFamily: 'monospace',
-                  fontSize: '0.62rem', lineHeight: 1.6, color: '#c0c8d8',
-                }}>
-                  {match.detectionLog.map((line, i) => {
-                    const color = line.startsWith('[CAR]')    ? '#10b981'
-                      : line.startsWith('[PLATE]')  ? '#3b82f6'
-                      : line.startsWith('[OCR]')    ? '#f5a623'
-                      : line.startsWith('[RESULT]') ? '#a855f7'
-                      : line.startsWith('[ERROR]')  ? '#ef4444'
-                      : '#c0c8d8';
-                    return <div key={i} style={{ color, whiteSpace: 'pre' }}>{line}</div>;
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Action buttons */}
-            <div style={{ marginTop: '12px' }}>
-              {isEntering ? (
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button onClick={() => handleAccept('ENTERED')} style={{
-                    flex: 1, padding: '9px', borderRadius: '7px', border: 'none', cursor: 'pointer',
-                    background: '#10b981', color: 'white', fontWeight: 800, fontSize: '0.82rem',
-                  }}>Accept</button>
-                  <button onClick={() => handleAccept('WAITING')} style={{
-                    flex: 1, padding: '9px', borderRadius: '7px', border: 'none', cursor: 'pointer',
-                    background: 'var(--accent-color)', color: 'black', fontWeight: 800, fontSize: '0.82rem',
-                  }}>Wait</button>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <select value={selectedExit} onChange={e => setSelectedExit(e.target.value)}
-                    style={{ width: '100%', padding: '8px 10px', background: 'rgba(255,255,255,0.07)', color: 'white', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '6px', fontSize: '0.82rem' }}>
-                    <option value="" disabled>Select vehicle in workshop...</option>
-                    {vehicles.filter(v => v.status === 'ENTERED').map(v => (
-                      <option key={v.id} value={v.id}>{v.id} — {v.colorName} {v.type}{v.licensePlate ? ` [${v.licensePlate}]` : ''}</option>
-                    ))}
-                  </select>
-                  <div style={{ display: 'flex', gap: '8px' }}>
-                    <button onClick={() => handleEgressUpdate('TEMP_OUT')} style={{ flex: 1, padding: '9px', borderRadius: '7px', border: '1px solid #f472b6', background: 'transparent', color: '#f472b6', fontWeight: 800, cursor: 'pointer', fontSize: '0.82rem' }}>Temp Out</button>
-                    <button onClick={() => handleEgressUpdate('EXITED')}   style={{ flex: 1, padding: '9px', borderRadius: '7px', border: '1px solid #a855f7', background: 'transparent', color: '#a855f7', fontWeight: 800, cursor: 'pointer', fontSize: '0.82rem' }}>Exited</button>
-                    <button onClick={dismissMatch} style={{ padding: '9px 12px', borderRadius: '7px', border: '1px solid rgba(255,255,255,0.1)', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.82rem' }}>✕</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
-
-      {/* 58mm thermal print */}
-      {match && (
-        <div className="thermal-print-container">
-          <div className="thermal-ticket">
-            <h2>AUTOTRACK GATE</h2><hr />
-            <div style={{ fontSize: '11px', fontWeight: 'bold', margin: '4px 0' }}>{isEntering ? '▼ ENTRY' : '▲ EXIT'}</div>
-            <div style={{ fontSize: '22px', fontWeight: 'bold', margin: '8px 0' }}>{match.id}</div>
-            <p>{match.colorName} {match.type}</p>
-            {match.licensePlate && <p style={{ fontSize: '16px', fontWeight: 'bold', letterSpacing: '0.15em', margin: '5px 0' }}>{match.licensePlate}</p>}
-            <p>{isEntering ? 'Entry' : 'Exit'}: {new Date(match.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
-            <div style={{ margin: '12px 0' }}><img src={match.qrCodeUrl} alt="QR" style={{ width: '110px' }} /></div>
-            <p style={{ fontSize: '10px' }}>Place on Dashboard</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

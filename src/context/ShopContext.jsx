@@ -91,10 +91,11 @@ export function ShopProvider({ children }) {
   };
 
   const addVehicle = (vehicleData) => {
+    const status = vehicleData.status || 'ENTERED';
     const newVehicle = {
       ...vehicleData,
-      status: 'ENTERED', // Default status when accepted
-      history: [{ status: 'ENTERED', timestamp: new Date().toISOString() }],
+      status,
+      history: [{ status, timestamp: new Date().toISOString() }],
       tenantId: user?.id || 'default'
     };
     setVehicles(prev => [newVehicle, ...prev]);

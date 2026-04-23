@@ -35,7 +35,7 @@ function MainApp() {
       return;
     }
 
-    const headers = ['ID', 'Type', 'Color', 'Status', 'Current Timestamp', 'Activity Flow'];
+    const headers = ['ID', 'License Plate Number', 'Status', 'Current Timestamp', 'Activity Flow'];
     const rows = filteredVehicles.map(v => {
       const historyArr = v.history || [{ status: 'ENTERED', timestamp: v.timestamp }];
       const historyStr = historyArr
@@ -48,8 +48,7 @@ function MainApp() {
 
       return [
         v.id, 
-        v.type, 
-        v.colorName, 
+        v.licensePlate || 'PENDING', 
         v.status || 'ENTERED', 
         new Date(v.timestamp).toLocaleString('en-GB', { 
           year: 'numeric', month: '2-digit', day: '2-digit', 
@@ -87,25 +86,7 @@ function MainApp() {
             AUTOTRACK
           </h1>
           
-          <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-            <Search size={14} style={{ position: 'absolute', left: '14px', color: '#6b7280' }} />
-            <input 
-              type="text" 
-              placeholder="Search vehicles, ID, color..." 
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              style={{ 
-                padding: '0.65rem 1.5rem 0.65rem 2.5rem', 
-                background: '#1c1e24', 
-                border: '1px solid #374151', 
-                borderRadius: '9999px', 
-                color: 'white', 
-                fontSize: '0.85rem',
-                width: '320px',
-                outline: 'none'
-              }}
-            />
-          </div>
+
         </div>
 
         <nav style={{ padding: 0 }}>
@@ -300,7 +281,7 @@ function MainApp() {
                 <thead>
                   <tr>
                     <th>License Plate</th>
-                    <th>Car Colour</th>
+                    <th>Vehicle ID</th>
                     <th>Entry Time</th>
                     <th>Status</th>
                   </tr>
@@ -308,13 +289,11 @@ function MainApp() {
                 <tbody>
                   {vehicles.filter(v => 
                     (v.licensePlate && v.licensePlate.toLowerCase().includes(searchTerm.toLowerCase())) ||
-                    v.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    v.colorName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                    v.type.toLowerCase().includes(searchTerm.toLowerCase())
+                    v.id.toLowerCase().includes(searchTerm.toLowerCase())
                   ).slice(0, 10).map(v => (
                     <tr key={v.id} className="animate-fade-in">
                       <td className="table-ve-id" style={{ letterSpacing: '0.05em', fontWeight: 800 }}>{v.licensePlate || 'PENDING'}</td>
-                      <td style={{ fontWeight: 600 }}>{v.colorName} {v.type}</td>
+                      <td style={{ fontWeight: 600 }}>{v.id}</td>
                       <td style={{ color: 'var(--text-secondary)' }}>
                         {new Date(v.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}, {new Date(v.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </td>
